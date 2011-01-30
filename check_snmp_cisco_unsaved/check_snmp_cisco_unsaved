@@ -170,9 +170,8 @@ sub main {
     my $LastChanged = 0;
     my $LastSaved   = 0;
 
-    #
-    # Gets status codes for primary and secondary
-    #
+    $s->translate(0);
+
     if ( !defined( $s->get_request($oid_lastChanged) ) ) {
         if ( !defined( $s->get_request($oid_sysDescr) ) ) {
             $returnstring = "SNMP agent not responding";
@@ -207,7 +206,7 @@ sub main {
 
     my $status = 0;
 
-    if ( $LastChanged < $LastSaved ) {
+    if ( $LastChanged > $LastSaved ) {
         $status = 1;
     }
     else {
