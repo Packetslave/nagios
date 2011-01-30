@@ -229,7 +229,7 @@ sub usage {
 --------------------------------------------------------------------	 
 $script v$script_version
 
-Checks status of Cisco CSS pair in HA mode
+Checks Cisco IOS devices for unsaved configuration changes
 
 Usage: $script -H <hostname> -c <community>
 Options:
@@ -238,8 +238,6 @@ Options:
         -C 		Community (default: public)
 
 --------------------------------------------------------------------	 
-Copyright (C) 2003-2010 Opsera Limited. All rights reserved	 
-	 
 This program is free software; you can redistribute it or modify
 it under the terms of the GNU General Public License
 --------------------------------------------------------------------
