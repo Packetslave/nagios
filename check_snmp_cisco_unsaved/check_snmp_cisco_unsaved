@@ -1,0 +1,250 @@
+#!/usr/bin/perl
+#
+# Nagios plugin that issues a WARNING if a Cisco IOS device has changes
+# to its running-config that are more recent than the last saved version
+# of the startup-config.
+# 
+# AUTHORS:
+#  Brian Landers <brian@packetslave.com>
+#
+# Based on code from Opsview by Opsera Limited.  This code is released
+# under the terms of the GNU General Public License, version 2 or later.
+#
+# Based on a blog post by Terry Slattery of Chesapeake NetCraftsmen.
+#
+
+use lib qw ( /usr/local/nagios/perl/lib );
+use Net::SNMP;
+use Getopt::Std;
+use strict;
+
+my $script         = "check_snmp_cisco_unsaved";
+my $script_version = "1.0";
+
+my $metric                         = 1;
+my $oid_sysDescr                   = ".1.3.6.1.2.1.1.1.0";
+my $oid_lastChanged                = ".1.3.6.1.4.1.9.9.43.1.1.1.0";
+my $oid_lastSaved                  = ".1.3.6.1.4.1.9.9.43.1.1.2.0";
+
+my $ipaddress           = "192.168.10.30";
+my $version             = "1";
+my $snmpv3_username     = "initial";         # SNMPv3 username
+my $snmpv3_password     = "";                # SNMPv3 password
+my $snmpv3_authprotocol = "md5";             # SNMPv3 hash algorithm (md5 / sha)
+my $snmpv3_privprotocol = "des";             # SNMPv3 encryption protocol (des / aes / aes128)
+my $community           = "public";          # Default community string (for SNMP v1 / v2c)
+my $timeout             = 2;
+my $warning             = 90;
+my $critical            = 95;
+my $status              = 0;
+my $returnstring        = "";
+my $port = 161;
+
+my $community      = "public";                  # Default community string
+my $configfilepath = "/usr/local/nagios/etc";
+
+# Do we have enough information?
+if ( @ARGV < 1 ) {
+    print "Too few arguments\n";
+    usage();
+}
+
+our ( $opt_h, $opt_H, $opt_C, $opt_U, $opt_P, $opt_a, $opt_e, $opt_v, $opt_p );
+my ( $hostname );
+getopts("hH:C:U:P:v:a:e:");
+if ($opt_h) {
+    usage();
+    exit(0);
+}
+if ($opt_H) {
+    $hostname = $opt_H;
+}
+else {
+    print "No hostname specified\n";
+    usage();
+}
+if ($opt_C) {
+    $community = $opt_C;
+}
+if ($opt_U) {
+    $snmpv3_username = $opt_U;
+}
+if ($opt_P) {
+    $snmpv3_password = $opt_P;
+}
+if ($opt_a) {
+    $snmpv3_authprotocol = $opt_a;
+}
+if ($opt_e) {
+    $snmpv3_privprotocol = $opt_e;
+}
+if ($opt_v) {
+    $version = $opt_v;
+}
+if ($opt_p) {
+    $port = $opt_p;
+}
+
+# Checks whether requested SNMP version is supported
+if ( $version !~ /^[13]|[2c]$/ ) {
+    print "SNMP v$version not supported by this plugin\n";
+    exit(1);
+}
+
+# Create the SNMP session
+my ( $s, $e );
+if ( $version == "3" ) {
+    ( $s, $e ) = Net::SNMP->session(
+        -username     => $snmpv3_username,
+        -authpassword => $snmpv3_password,
+        -authprotocol => $snmpv3_authprotocol,
+        -privprotocol => $snmpv3_privprotocol,
+        -hostname     => $hostname,
+        -version      => $version,
+        -timeout      => $timeout,
+        -port         => $port,
+    );
+    if ($s) {
+    }
+    else {
+        print "Agent not responding, tried SNMP v3 ($e)\n";
+        exit(1);
+    }
+}
+
+my $triedv2c = 0;    # Track whether we've attempted SNMPv2c connection
+if ( $version == "2c" ) {
+    ( $s, $e ) = Net::SNMP->session(
+        -community => $community,
+        -hostname  => $hostname,
+        -version   => $version,
+        -timeout   => $timeout,
+        -port      => $port,
+    );
+    if ( !defined( $s->get_request($oid_sysDescr) ) ) {
+
+        # try SNMP v1 if v2c doesn't work
+        $triedv2c = 1;
+        $version  = 1;
+    }
+}
+
+if ( $version == "1" ) {
+    ( $s, $e ) = Net::SNMP->session(
+        -community => $community,
+        -hostname  => $hostname,
+        -version   => $version,
+        -timeout   => $timeout,
+        -port      => $port,
+    );
+    if ( !defined( $s->get_request($oid_sysDescr) ) ) {
+        if ( $triedv2c == 1 ) {
+            print "Agent not responding, tried SNMP v1 and v2c\n";
+        }
+        else {
+            print "Agent not responding, tried SNMP v1\n";
+        }
+        exit(1);
+    }
+}
+
+$status = main();
+
+# Close the session
+$s->close();
+
+if ( $returnstring eq "" ) {
+    $status = 3;
+}
+
+print "$returnstring\n";
+
+exit $status;
+
+####################################################################
+# This is where we gather data via SNMP and return results         #
+####################################################################
+
+sub main {
+
+    my $LastChanged = 0;
+    my $LastSaved   = 0;
+
+    #
+    # Gets status codes for primary and secondary
+    #
+    if ( !defined( $s->get_request($oid_lastChanged) ) ) {
+        if ( !defined( $s->get_request($oid_sysDescr) ) ) {
+            $returnstring = "SNMP agent not responding";
+            $status       = 1;
+            return 1;
+        }
+        else {
+            $returnstring = "SNMP OID does not exist";
+            $status       = 1;
+            return 1;
+        }
+    }
+    foreach ( $s->var_bind_names() ) {
+        $LastChanged = $s->var_bind_list()->{$_};
+    }
+
+    if ( !defined( $s->get_request($oid_lastSaved) ) ) {
+        if ( !defined( $s->get_request($oid_sysDescr) ) ) {
+            $returnstring = "SNMP agent not responding";
+            $status       = 1;
+            return 1;
+        }
+        else {
+            $returnstring = "SNMP OID does not exist";
+            $status       = 1;
+            return 1;
+        }
+    }
+    foreach ( $s->var_bind_names() ) {
+        $LastSaved = $s->var_bind_list()->{$_};
+    }
+
+    my $status = 0;
+
+    if ( $LastChanged < $LastSaved ) {
+        $status = 1;
+    }
+    else {
+        $status = 0;
+    }
+
+    $returnstring = "Last Saved: $LastSaved, Last Changed: $LastChanged";
+
+    return ($status);
+
+}
+
+####################################################################
+# help and usage information                                       #
+####################################################################
+
+sub usage {
+    print << "USAGE";
+--------------------------------------------------------------------	 
+$script v$script_version
+
+Checks status of Cisco CSS pair in HA mode
+
+Usage: $script -H <hostname> -c <community>
+Options:
+        -H 		Hostname or IP address
+        -p 		Port (default:161)
+        -C 		Community (default: public)
+
+--------------------------------------------------------------------	 
+Copyright (C) 2003-2010 Opsera Limited. All rights reserved	 
+	 
+This program is free software; you can redistribute it or modify
+it under the terms of the GNU General Public License
+--------------------------------------------------------------------
+
+USAGE
+    exit 1;
+}
+
