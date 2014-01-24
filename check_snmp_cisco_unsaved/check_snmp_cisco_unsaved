@@ -1,46 +1,54 @@
 #!/usr/bin/perl
 #
-# Nagios plugin that issues a WARNING if a Cisco IOS device has changes
-# to its running-config that are more recent than the last saved version
+# Nagios plugin that raises a WARNING or CRITICAL if a Cisco IOS device has changes
+# to its running-config that are more recent than the last changed version
 # of the startup-config.
-# 
-# AUTHORS:
-#  Brian Landers <brian@packetslave.com>
 #
-# Based on code from Opsview by Opsera Limited.  This code is released
+# AUTHORS:
+# Brian Landers <brian@packetslave.com>
+#
+# Based on code from Opsview by Opsera Limited. This code is released
 # under the terms of the GNU General Public License, version 2 or later.
 #
 # Based on a blog post by Terry Slattery of Chesapeake NetCraftsmen.
 #
+# Adapted 01/2014 by Simon Meggle <simon.meggle@consol.de>
+# - plugin uses OID startupLastChanged instead of runningLastSaved
+# - improved output
+# - introduced parameter --boottime, which saved the running-config write on boot time 
+#   from being recognized as unsaved change
 
 use lib qw ( /usr/local/nagios/perl/lib );
 use Net::SNMP;
 use Getopt::Std;
+use Time::localtime;
 use strict;
 
-my $script         = "check_snmp_cisco_unsaved";
-my $script_version = "1.0";
+my $script = "check_snmp_cisco_unsaved";
+my $script_version = "1.1";
 
-my $metric                         = 1;
-my $oid_sysDescr                   = ".1.3.6.1.2.1.1.1.0";
-my $oid_lastChanged                = ".1.3.6.1.4.1.9.9.43.1.1.1.0";
-my $oid_lastSaved                  = ".1.3.6.1.4.1.9.9.43.1.1.2.0";
+my $metric = 1;
+my $oid_sysDescr = ".1.3.6.1.2.1.1.1.0";
+my $oid_uptime = "1.3.6.1.2.1.1.3.0";
+my $oid_runningLastChanged = ".1.3.6.1.4.1.9.9.43.1.1.1.0";
+my $oid_startupLastChanged = ".1.3.6.1.4.1.9.9.43.1.1.3.0";
 
-my $ipaddress           = "192.168.10.30";
-my $version             = "1";
-my $snmpv3_username     = "initial";         # SNMPv3 username
-my $snmpv3_password     = "";                # SNMPv3 password
-my $snmpv3_authprotocol = "md5";             # SNMPv3 hash algorithm (md5 / sha)
-my $snmpv3_privprotocol = "des";             # SNMPv3 encryption protocol (des / aes / aes128)
-my $community           = "public";          # Default community string (for SNMP v1 / v2c)
-my $timeout             = 2;
-my $warning             = 90;
-my $critical            = 95;
-my $status              = 0;
-my $returnstring        = "";
+my $ipaddress = "192.168.10.30";
+my $version = "1";
+my $snmpv3_username = "initial"; # SNMPv3 username
+my $snmpv3_password = ""; # SNMPv3 password
+my $snmpv3_authprotocol = "md5"; # SNMPv3 hash algorithm (md5 / sha)
+my $snmpv3_privprotocol = "des"; # SNMPv3 encryption protocol (des / aes / aes128)
+my $community = "public"; # Default community string (for SNMP v1 / v2c)
+my $timeout = 2;
+my $status = 0;
+my $returnstring = "";
 my $port = 161;
+my $warnh = 1;
+my $crith = 2;
+my $boottime = 180;
 
-my $community      = "public";                  # Default community string
+my $community = "public"; # Default community string
 my $configfilepath = "/usr/local/nagios/etc";
 
 # Do we have enough information?
@@ -49,9 +57,9 @@ if ( @ARGV < 1 ) {
     usage();
 }
 
-our ( $opt_h, $opt_H, $opt_C, $opt_U, $opt_P, $opt_a, $opt_e, $opt_v, $opt_p );
+our ( $opt_h, $opt_H, $opt_C, $opt_U, $opt_P, $opt_a, $opt_e, $opt_v, $opt_p, $opt_w, $opt_c, $opt_b );
 my ( $hostname );
-getopts("hH:C:U:P:v:a:e:");
+getopts("hH:C:U:P:v:a:e:w:c:b:");
 if ($opt_h) {
     usage();
     exit(0);
@@ -85,6 +93,16 @@ if ($opt_p) {
     $port = $opt_p;
 }
 
+if ($opt_w) {
+    $warnh = $opt_w;
+}
+if ($opt_c) {
+    $crith = $opt_c;
+}
+if ($opt_b) {
+    $boottime = $opt_b;
+}
+
 # Checks whether requested SNMP version is supported
 if ( $version !~ /^[13]|[2c]$/ ) {
     print "SNMP v$version not supported by this plugin\n";
@@ -95,14 +113,15 @@ if ( $version !~ /^[13]|[2c]$/ ) {
 my ( $s, $e );
 if ( $version == "3" ) {
     ( $s, $e ) = Net::SNMP->session(
-        -username     => $snmpv3_username,
+        -username => $snmpv3_username,
         -authpassword => $snmpv3_password,
         -authprotocol => $snmpv3_authprotocol,
         -privprotocol => $snmpv3_privprotocol,
-        -hostname     => $hostname,
-        -version      => $version,
-        -timeout      => $timeout,
-        -port         => $port,
+        -hostname => $hostname,
+        -version => $version,
+        -timeout => $timeout,
+        -port => $port,
+        -boottime => $boottime,
     );
     if ($s) {
     }
@@ -112,30 +131,30 @@ if ( $version == "3" ) {
     }
 }
 
-my $triedv2c = 0;    # Track whether we've attempted SNMPv2c connection
+my $triedv2c = 0; # Track whether we've attempted SNMPv2c connection
 if ( $version == "2c" ) {
     ( $s, $e ) = Net::SNMP->session(
         -community => $community,
-        -hostname  => $hostname,
-        -version   => $version,
-        -timeout   => $timeout,
-        -port      => $port,
+        -hostname => $hostname,
+        -version => $version,
+        -timeout => $timeout,
+        -port => $port,
     );
     if ( !defined( $s->get_request($oid_sysDescr) ) ) {
 
         # try SNMP v1 if v2c doesn't work
         $triedv2c = 1;
-        $version  = 1;
+        $version = 1;
     }
 }
 
 if ( $version == "1" ) {
     ( $s, $e ) = Net::SNMP->session(
         -community => $community,
-        -hostname  => $hostname,
-        -version   => $version,
-        -timeout   => $timeout,
-        -port      => $port,
+        -hostname => $hostname,
+        -version => $version,
+        -timeout => $timeout,
+        -port => $port,
     );
     if ( !defined( $s->get_request($oid_sysDescr) ) ) {
         if ( $triedv2c == 1 ) {
@@ -148,7 +167,7 @@ if ( $version == "1" ) {
     }
 }
 
-$status = main();
+($status,$returnstring) = main();
 
 # Close the session
 $s->close();
@@ -162,81 +181,132 @@ print "$returnstring\n";
 exit $status;
 
 ####################################################################
-# This is where we gather data via SNMP and return results         #
+# This is where we gather data via SNMP and return results #
 ####################################################################
 
 sub main {
 
-    my $LastChanged = 0;
-    my $LastSaved   = 0;
+    my $running_lchanged = 0;
+    my $startup_lchanged = 0;
+    my $uptime = 0;
 
     $s->translate(0);
 
-    if ( !defined( $s->get_request($oid_lastChanged) ) ) {
+    if ( !defined( $s->get_request($oid_runningLastChanged) ) ) {
         if ( !defined( $s->get_request($oid_sysDescr) ) ) {
             $returnstring = "SNMP agent not responding";
-            $status       = 1;
+            $status = 1;
             return 1;
         }
         else {
             $returnstring = "SNMP OID does not exist";
-            $status       = 1;
+            $status = 1;
             return 1;
         }
     }
     foreach ( $s->var_bind_names() ) {
-        $LastChanged = $s->var_bind_list()->{$_};
+        $running_lchanged = $s->var_bind_list()->{$_};
     }
 
-    if ( !defined( $s->get_request($oid_lastSaved) ) ) {
+    if ( !defined( $s->get_request($oid_startupLastChanged) ) ) {
         if ( !defined( $s->get_request($oid_sysDescr) ) ) {
             $returnstring = "SNMP agent not responding";
-            $status       = 1;
+            $status = 1;
             return 1;
         }
         else {
             $returnstring = "SNMP OID does not exist";
-            $status       = 1;
+            $status = 1;
             return 1;
         }
     }
     foreach ( $s->var_bind_names() ) {
-        $LastSaved = $s->var_bind_list()->{$_};
+        $startup_lchanged = $s->var_bind_list()->{$_};
+    }
+
+
+    if ( !defined( $s->get_request($oid_uptime) ) ) {
+        if ( !defined( $s->get_request($oid_uptime) ) ) {
+            $returnstring = "SNMP agent not responding";
+            $status = 1;
+            return 1;
+        }
+        else {
+            $returnstring = "SNMP OID does not exist";
+            $status = 1;
+            return 1;
+        }
+    }
+    foreach ( $s->var_bind_names() ) {
+        $uptime = $s->var_bind_list()->{$_};
     }
 
     my $status = 0;
 
-    if ( $LastChanged > $LastSaved ) {
-        $status = 1;
-    }
-    else {
+    my $deltasec_running = ($uptime - $running_lchanged) / 100;
+    my $deltasec_startup = ($uptime - $startup_lchanged) / 100;
+    my $running_time = localtime(time()-$deltasec_running);
+    my $startup_time = localtime(time()-$deltasec_startup);
+    my $running_changed_date = sprintf("%02d.%02d.%d, %02d:%02d:%02d",$running_time->mday,$running_time->mon+1,$running_time->year+1900,$running_time->hour,$running_time->min,$running_time->sec );
+    my $startup_lchanged_date = sprintf("%02d.%02d.%d, %02d:%02d:%02d",$startup_time->mday,$startup_time->mon+1,$startup_time->year+1900,$startup_time->hour,$startup_time->min,$startup_time->sec );
+
+    # hours since last running cfg change until now
+    my $deltah = sprintf("%0.1f",(($uptime - $running_lchanged) / 100) / 60 / 60);
+
+    # SNMPv2-SMI::enterprises.9.9.43.1.1.1.0 = Timeticks: (9056) 0:01:30.56 --> running lastchanged
+    # SNMPv2-SMI::enterprises.9.9.43.1.1.3.0 = Timeticks: (0) 0:00:00.00    --> startup lastchanged
+
+    if ($startup_lchanged > $running_lchanged) {
         $status = 0;
+        my $time = localtime(time()-$deltasec_startup);
+        $returnstring = sprintf("OK: Device running configuration is unchanged (last startup cfg saved at " . $startup_lchanged_date . ")" );
+    } elsif ($startup_lchanged/100 == 0 and ($running_lchanged/100) < $boottime ) {
+        $status = 0;
+        $returnstring = "OK: Device running configuration is unchanged (no cfg change since last reboot).";
+    } else {
+        if ($deltah > $crith) {
+            $status = 2;
+            $returnstring = sprintf("CRITICAL: Device running configuration was CHANGED on %s and is UNSAVED since %d h (warn at %d, crit at %d h).", $running_changed_date,$deltah, $warnh, $crith);
+
+        } elsif ($deltah > $warnh) {
+            $status = 1;
+            $returnstring = sprintf("WARNING: Device running configuration was CHANGED on %s and is UNSAVED since %d h (warn at %d, crit at %d h).", $running_changed_date,$deltah, $warnh, $crith); 
+
+        } else {
+            $status = 0;
+            $returnstring = sprintf("OK: Device running configuration was changed on %s and is unsaved since %d h (warn at %d, crit at %d h).", $running_changed_date,$deltah, $warnh, $crith);
+        }
     }
 
-    $returnstring = "Last Saved: $LastSaved, Last Changed: $LastChanged";
-
-    return ($status);
+    return ($status,$returnstring);
 
 }
 
 ####################################################################
-# help and usage information                                       #
+# help and usage information #
 ####################################################################
 
 sub usage {
     print << "USAGE";
---------------------------------------------------------------------	 
+--------------------------------------------------------------------
 $script v$script_version
 
 Checks Cisco IOS devices for unsaved configuration changes
 
-Usage: $script -H <hostname> -c <community>
+Usage: $script -H <hostname> -c <community> -b <boottime> -w <warnh>
+         -c <crith>
 Options:
-        -H 		Hostname or IP address
-        -p 		Port (default:161)
-        -C 		Community (default: public)
-
---------------------------------------------------------------------	 
+        -H Hostname or IP address
+        -p Port (default:161)
+        -C Community (default: public)
+        -w Warning threshold for the time passed since the last 
+           running cfg change. Default: 1h
+        -c Critical threshold for the time passed since the last 
+           running cfg change. Default: 2h
+        -b Estimated boot time of the device. Because the running 
+           config will be written (=changed) on each boot process, 
+           this change must no be alarmed. Default: 180 seconds.
+--------------------------------------------------------------------
 This program is free software; you can redistribute it or modify
 it under the terms of the GNU General Public License
 --------------------------------------------------------------------
@@ -244,4 +314,3 @@ it under the terms of the GNU General Public License
 USAGE
     exit 1;
 }
-
